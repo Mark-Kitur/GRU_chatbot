@@ -2,8 +2,44 @@ import torch
 import wordninja    
 import os
 import torch.nn as nn
+import unicodedata
+import re 
+import pickle
 device = torch.device('cpu')
 
+with open('vocab.pkl', 'rb') as f:
+    vocab = pickle.load(f)
+
+
+PAD_token = 0
+SOS_token = 1
+EOS_token = 2
+
+#index2oword
+class Voc:
+    def __init__(self,vocab):
+        self.trimmed =False
+        self.word2index={}
+        self.word2count={}
+        self.index2word = vocab
+        self.num_words =3
+
+
+
+voc = Voc(vocab)
+
+
+def unicodetoascii(s):
+    return "".join(
+        c for c in unicodedata.normalize('NFD',s)
+        if unicodedata.category(c) != 'Mn'
+    )
+def normalize_string(s):
+    s = unicodetoascii(s.lower().strip())
+    s = re.sub(r"([.!?])", r" \1",s)
+    s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
+    r = re.sub(r"\s+", r" ", s).strip()
+    return s
 
 class Encoder(nn.Module):
     def __init__(self, hidden_size, embedding, n_layers=1, dropout=0):
@@ -93,27 +129,47 @@ class Decoder(nn.Module):
 class GreedySearch(nn.Module):
     def __init__(self, encoder, decoder):
         super().__init__()
-        self.encoder =encoder
-        self.decoder= decoder
+        self.encoder = encoder
+        self.decoder = decoder
 
-    def forward(self, input_seq, input_length, max_lenth):
-        encoder_outputs, encoder_hidden = self.encoder(input_seq, input_length)
+    def forward(self, input_seq, input_length, max_length):
+        encoder_outputs , encoder_hidden = self.encoder(input_seq, input_length)
         decoder_hidden = encoder_hidden[:self.decoder.n_layers]
-        decoder_input = torch.ones(1,1,device=device, dtype=torch.long) * SOS_token
+        decoder_input = torch.ones(1,1,device=device, dtype=torch.long) *SOS_token
         all_tokens = torch.zeros([0], device=device, dtype=torch.long)
         all_scores = torch.zeros([0], device=device)
 
-        for _ in range(max_lenth):
-            decoder_output, decoder_hidden= self.decoder(decoder_input, decoder_hidden, encoder_outputs)
-            decoder_scores = decoder_input = torch.max(decoder_output,dim=1)
-            all_tokens = torch.cat((all_tokens,decoder_input), dim=1)
+        # Iteratively decode one word token at a time
+        for _ in range(max_length):
+            decoder_output ,decoder_hidden = self.decoder(decoder_input, decoder_hidden, encoder_outputs)
+            decoder_scores , decoder_input = torch.max(decoder_output,dim=1)
+            all_tokens = torch.cat((all_tokens,decoder_input), dim=0)
             all_scores = torch.cat((all_scores,decoder_scores),dim=0)
+            decoder_input = torch.unsqueeze(decoder_input,0)
 
-            decoder_input =torch.unsqueeze(decoder_input,0)
+        return all_tokens, all_scores 
 
-        return all_tokens, all_scores
+def indexes_from_sentence(voc,sentense):
+    return [voc.word2index[word] for word in sentense.split(' ')] +[EOS_token]
+
+def  evaluate(encoder, decoder, searcher, voc , sentence, max_length =10):
+    indexes_batch = [indexes_from_sentence(voc,sentence)]
+    lengths = torch.tensor([len(indexes) for indexes in indexes_batch])
+    input_batch = torch.LongTensor(indexes_batch).transpose(0,1)
+    input_batch =input_batch.to(device)
+    lengths = lengths.to(device)
+    tokens , scores = searcher(input_batch, lengths,max_length)
+    decoded_words = [vocab[token.item()] for  token in tokens]
+
+    return decoded_words
 
 
+# Important params
+attn_model = 'dot'
+hidden_size = 500
+encoder_n_layers = 2
+decoder_n_layers = 2
+dropout = 0.1
 
 loadfilename = '/media/mark/New Volume/data_science/convo_bot/real_model_1.pth'
 
@@ -131,13 +187,29 @@ def load_model(filename):
     embedding = nn.Embedding(voc.num_words, hidden_size)
     embedding.load_state_dict(embedding_sd)
     encoder = Encoder(hidden_size, embedding, encoder_n_layers, dropout)
-    decoder = Decoder(attn_model, hidden_size, voc.num_words, decoder_n_layers, dropout)
+    decoder = Decoder(attn_model,embedding,hidden_size,voc.num_words, decoder_n_layers,dropout )
 
     encoder.load_state_dict(encoder_sd)
     decoder.load_state_dict(decoder_sd)
 
-    encoder.eval()
-    decoder.eval()
-
+    
     print('Model loaded successfully')
+    return encoder, decoder
 
+encoder , decoder =load_model(loadfilename)
+searcher = GreedySearch(encoder, decoder)
+
+def take_input():
+    input_sentence = ''
+    while(1):
+        try:
+            input_sentence = input('>>> ')
+            if input_sentence == 'q' or input_sentence == 'quit': break
+            input_sentence = normalize_string(input_sentence)
+            output_words = evaluate(encoder, decoder, searcher, voc, input_sentence)
+            output_words[:] = [x for x in output_words if not (x =='EOS' or x =='PAD')]
+            print('Bot:', ' '.join(output_words))
+        except KeyError:
+            print("Error: Encountered unknown word.")
+   
+take_input()
